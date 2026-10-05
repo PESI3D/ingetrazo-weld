@@ -23,6 +23,7 @@ Kanten auswählen und **Weld Edges…** starten. Jede zusammenhängende Kette wi
 - Ein Undo-Schritt pro Befehl. Der Dialog blockiert den Viewport nicht (Orbit, Pan, Zoom).
 
 ## Änderungen
+- **1.1** — eigene Werkzeugleiste **Weld** mit einem Icon je Befehl (Weld Edges… · Unweld Edges). Sie erscheint in einer eigenen Zeile unter den eingebauten Leisten und lässt sich wie diese verschieben, abdocken oder ausblenden (Rechtsklick auf eine Leiste). Icons im Stil von IngeTrazo, passend zum hellen/dunklen Theme.
 - **1.0** — erste Veröffentlichung.
 
 ## Lizenz
