@@ -11,10 +11,13 @@ Joins loose edges into **one curve** that selects with a single click — like a
 2. Copy `weld_tool.py` into that folder.
 3. Restart IngeTrazo → **Extensions ▸ Weld ▸** *Weld Edges… · Unweld Edges* (also on the right-click menu when edges are selected).
 
-Requires IngeTrazo ≥ 0.5 (extension API 2).
+Requires IngeTrazo ≥ 0.5.6 (extension API 2) · tested with IngeTrazo 0.5.8.
 
 ## How to use
-Select the edges and run **Weld Edges…**. Every unbroken chain becomes one curve; the preview shows each future curve in its own colour and every gap that will close in red.
+Select the edges and run **Weld Edges…**. Every unbroken chain becomes one curve.
+
+- **Live Preview** (as in every PESI3D plugin): the welded curves stand in the model at once, as one undo step, and follow every change; **OK** keeps them, **Cancel** takes them back, **Reset** = default settings. Preview off, the plan is drawn over the model — each future curve in its own colour, every gap that will close in red.
+- **Follow selection**: select other edges while the dialog is open and the preview moves there; **↻ Read selection** reads the selection at once.
 
 - **Close gaps up to** — joins open ends closer than this distance (document unit). Two free ends meet in the middle; a free end next to attached geometry moves onto it. Faces are never moved.
 - **Remove collinear points** — drops the extra vertices of straight runs (only where no face uses them).
@@ -23,6 +26,7 @@ Select the edges and run **Weld Edges…**. Every unbroken chain becomes one cur
 - One undo step per command. The dialog does not block the viewport (orbit, pan, zoom).
 
 ## Changelog
+- **1.2** — the PESI3D Live Preview: the real result in the model as one undo step (button *● Live Preview ON*, banner, *Reset*, *OK* keeps the preview, *Cancel* takes it back); **Follow selection** and **↻ Read selection**. Tested with IngeTrazo 0.5.8.
 - **1.1** — own toolbar **Weld** with one icon per command (Weld Edges… · Unweld Edges). It starts on a row of its own under the built-in toolbars; move, float or hide it like those (right-click on a toolbar). Icons drawn in IngeTrazo's own style, they follow the light/dark theme.
 - **1.0** — first release.
 

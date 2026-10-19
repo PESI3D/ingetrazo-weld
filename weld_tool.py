@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 
 KEY = "weld_tool"
-VERSION = "1.1"
+VERSION = "1.2"
 
 _TEXTS = {
     "de": {
@@ -53,6 +53,10 @@ _TEXTS = {
         "Welded: {n} curve(s), {g} gap(s) closed, {p} point(s) removed":
             "Verschweißt: {n} Kurve(n), {g} Lücke(n) geschlossen, {p} Punkt(e) entfernt",
         "Unwelded {n} edge(s)": "{n} Kante(n) gelöst",
+        "While the dialog is open, a changed selection of edges is read again by itself.":
+            "Solange der Dialog offen ist, wird eine geänderte Kantenauswahl von selbst neu gelesen.",
+        "Take the selected edges as the source now.": "Die gewählten Kanten jetzt als Quelle nehmen.",
+        "Back to the default settings.": "Zurück zu den Standardwerten.",
         "Nothing to weld: every chain is a single edge.":
             "Nichts zu verschweißen: jede Kette besteht aus nur einer Kante.",
         "The selection changed — nothing left to weld.":
@@ -81,6 +85,10 @@ _TEXTS = {
         "Welded: {n} curve(s), {g} gap(s) closed, {p} point(s) removed":
             "Soldado: {n} curva(s), {g} hueco(s) cerrados, {p} punto(s) quitados",
         "Unwelded {n} edge(s)": "{n} arista(s) separadas",
+        "While the dialog is open, a changed selection of edges is read again by itself.":
+            "Con el diálogo abierto, una nueva selección de aristas se lee sola.",
+        "Take the selected edges as the source now.": "Tomar ahora las aristas seleccionadas como origen.",
+        "Back to the default settings.": "Volver a los valores por defecto.",
         "Nothing to weld: every chain is a single edge.":
             "Nada que soldar: cada cadena es una sola arista.",
         "The selection changed — nothing left to weld.":
@@ -449,11 +457,18 @@ def _draw_preview(viewport, painter) -> None:
 
 
 def open_dialog(viewport) -> None:
-    from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
-                                   QDoubleSpinBox, QFormLayout, QHBoxLayout,
-                                   QLabel, QVBoxLayout)
+    """The Weld dialog, with the PESI3D Live Preview: switched on, the
+    welded curves stand in the model as ONE undo step and follow every
+    change; OK keeps them, Cancel takes them back. Preview off, the plan
+    is only drawn over the model (each future curve, every gap in red)."""
+    from PySide6.QtCore import QSettings, Qt, QTimer
+    from PySide6.QtWidgets import (QCheckBox, QDialog, QDoubleSpinBox,
+                                   QFormLayout, QHBoxLayout, QLabel,
+                                   QPushButton, QVBoxLayout)
+    from core.history import SnapshotImport
 
-    edges = selected_edges(viewport.scene)
+    scene = viewport.scene
+    edges = selected_edges(scene)
     if not edges:
         viewport.flash_status(_tr("Select the edges to weld first."), 4000)
         return
@@ -462,13 +477,24 @@ def open_dialog(viewport) -> None:
         old.close()
 
     scale, unit = _unit_scale_and_label()
+    S = {"edges": list(edges)}
     dlg = QDialog(viewport.window())
     dlg.setWindowTitle(f"{_tr('Weld')} {VERSION}")
     dlg.setModal(False)
+    dlg.setAttribute(Qt.WA_DeleteOnClose, True)
     lay = QVBoxLayout(dlg)
     form = QFormLayout()
     info = QLabel()
     form.addRow(_tr("Selection"), info)
+    srow = QHBoxLayout()
+    follow = QCheckBox("Follow selection", dlg)
+    follow.setToolTip(_tr("While the dialog is open, a changed selection of edges is read again by itself."))
+    b_read = QPushButton("↻ Read selection", dlg)
+    b_read.setToolTip(_tr("Take the selected edges as the source now."))
+    srow.addWidget(follow)
+    srow.addStretch(1)
+    srow.addWidget(b_read)
+    form.addRow(srow)
 
     gap_row = QHBoxLayout()
     gap_on = QCheckBox(_tr("Close gaps up to"))
@@ -483,29 +509,98 @@ def open_dialog(viewport) -> None:
     form.addRow("", gap_info)
     collinear = QCheckBox(_tr("Remove collinear points"))
     form.addRow(collinear)
-    preview = QCheckBox(_tr("Preview"))
-    form.addRow(preview)
     lay.addLayout(form)
-    btns = QDialogButtonBox()
-    ok = btns.addButton(_tr("Weld"), QDialogButtonBox.AcceptRole)
-    btns.addButton(_tr("Cancel"), QDialogButtonBox.RejectRole)
-    lay.addWidget(btns)
 
-    # Remembered settings.
-    from PySide6.QtCore import QSettings
+    pv_lbl = QLabel(dlg)
+    pv_lbl.setWordWrap(True)
+    pv_lbl.setVisible(False)
+    lay.addWidget(pv_lbl)
+    row = QHBoxLayout()
+    pv_btn = QPushButton("Preview", dlg)
+    pv_btn.setCheckable(True)
+    reset = QPushButton("Reset", dlg)
+    reset.setToolTip(_tr("Back to the default settings."))
+    ok = QPushButton("OK", dlg)
+    ok.setDefault(True)
+    cancel = QPushButton("Cancel", dlg)
+    row.addWidget(pv_btn)
+    row.addWidget(reset)
+    row.addStretch(1)
+    row.addWidget(ok)
+    row.addWidget(cancel)
+    lay.addLayout(row)
+
     st = QSettings()
     gap_on.setChecked(st.value(f"plugins/{KEY}/gaps", True, type=bool))
-    tol_m = float(st.value(f"plugins/{KEY}/tol_m", 0.01))
-    gap_val.setValue(tol_m / scale)
+    gap_val.setValue(float(st.value(f"plugins/{KEY}/tol_m", 0.01)) / scale)
     collinear.setChecked(st.value(f"plugins/{KEY}/collinear", False, type=bool))
-    preview.setChecked(st.value(f"plugins/{KEY}/preview", True, type=bool))
+    follow.setChecked(st.value(f"plugins/{KEY}/follow", True, type=bool))
+
+    pv_on_style = ("QPushButton { background: #2e9e4f; color: white; "
+                   "font-weight: bold; border: 1px solid #1f7a3a; "
+                   "border-radius: 3px; padding: 3px 8px; }")
+    banners = {"live": "background: #1f5f33; color: #e8ffe9;",
+               "busy": "background: #7a5a12; color: #fff6e0;",
+               "error": "background: #7a1f1f; color: #ffecec;"}
+    pv = {"cmd": None, "key": None, "result": None}
 
     def tol() -> float:
         return gap_val.value() * scale if gap_on.isChecked() else 0.0
 
-    def refresh(*_a):
-        live = set(viewport.scene.mesh.edges)
-        cur = [e for e in edges if e in live]
+    def state_key():
+        return (tuple(id(e) for e in S["edges"]), round(tol(), 9), collinear.isChecked())
+
+    def banner(kind, text):
+        pv_lbl.setStyleSheet(banners[kind] + " padding: 6px 8px; border-radius: 3px;")
+        pv_lbl.setText(text)
+        pv_lbl.setVisible(True)
+
+    def style_preview(on):
+        if on:
+            pv_btn.setText("● Live Preview ON")
+            pv_btn.setStyleSheet(pv_on_style)
+            pv_btn.setToolTip("The preview follows every change by itself — click to switch it off.")
+        else:
+            pv_btn.setText("Preview")
+            pv_btn.setStyleSheet("")
+            pv_btn.setToolTip("Weld in the model now; it then follows every change by itself.")
+            pv_lbl.setVisible(False)
+
+    sig = {"v": frozenset()}
+
+    def sel_sig():
+        try:
+            return frozenset(id(e) for e in scene.selection)
+        except Exception:  # noqa: BLE001
+            return frozenset()
+
+    def select_quietly(items):
+        """Select ``items`` without «Follow selection» taking it as new."""
+        try:
+            scene.select(list(items))
+        except Exception:  # noqa: BLE001
+            scene.selection.clear()
+            scene.selection.update(items)
+        sig["v"] = sel_sig()
+        viewport.update()
+
+    def undo_preview():
+        cmd, pv["cmd"] = pv["cmd"], None
+        pv["result"] = None
+        if cmd is None:
+            return
+        stack = getattr(viewport.history, "undo_stack", [])
+        if stack and stack[-1] is cmd:
+            viewport.history.undo()
+            viewport.notify_scene_changed()
+            live = set(scene.mesh.edges)
+            select_quietly([e for e in S["edges"] if e in live])
+
+    def show_plan():
+        """The plan of the source (counts; drawn over the model while the
+        preview is off)."""
+        live = set(scene.mesh.edges)
+        cur = [e for e in S["edges"] if e in live]
         chains = build_chains(cur)
         pairs, blocked = find_gaps(cur, tol())
         n_curves = sum(1 for c in chains if len(c[0]) >= 2)
@@ -517,30 +612,141 @@ def open_dialog(viewport) -> None:
             txt += "\n" + _tr("{n} gap(s) between attached ends — left open", n=blocked)
         gap_info.setText(txt)
         gap_val.setEnabled(gap_on.isChecked())
-        if preview.isChecked():
+        if pv_btn.isChecked():
+            _STATE["preview"] = None
+        else:
             _STATE["preview"] = {
                 "chains": [[v.position.toTuple() for v in c[1]] for c in chains],
                 "gaps": [(m.position.toTuple(), k.position.toTuple())
-                         for k, m, _t in pairs],
-            }
-        else:
-            _STATE["preview"] = None
-        viewport.update()
+                         for k, m, _t in pairs]}
+        return cur
+
+    def refresh():
+        undo_preview()
+        cur = show_plan()
+        if not pv_btn.isChecked():
+            viewport.update()
+            return
+        if not cur:
+            banner("error", "The edges are gone — select edges and ↻ Read selection.")
+            return
+        banner("busy", "⟳ Updating the preview…")
+        result = {}
+        t, c = tol(), collinear.isChecked()
+
+        def mutate(sc):
+            result.update(weld(sc.mesh, cur, t, c))
+
+        cmd = SnapshotImport(mutate)
+        viewport.history.execute(cmd)
+        err = getattr(viewport.history, "last_error", None)
+        if err:
+            banner("error", f"Preview failed: {str(err).split(': ', 1)[-1]}")
+            return
+        viewport.notify_scene_changed()
+        pv["cmd"], pv["key"], pv["result"] = cmd, state_key(), result
+        live = set(scene.mesh.edges)
+        select_quietly([e for e in result.get("edges", []) if e in live])
+        banner("live", f"● <b>LIVE PREVIEW</b> — {result.get('curves', 0)} curves, "
+               f"{result.get('gaps', 0)} gaps closed, {result.get('points', 0)} points "
+               f"removed · changes apply instantly")
+
+    timer = QTimer(dlg)
+    timer.setSingleShot(True)
+    timer.setInterval(250)
+    timer.timeout.connect(refresh)
+
+    def changed(*_a):
+        if pv_btn.isChecked():
+            banner("busy", "⟳ Updating the preview…")
+        timer.start()
+
+    def read_selection(manual):
+        """The selected edges become the source (the preview's own result
+        selected never counts)."""
+        new = selected_edges(scene)
+        if not new:
+            if manual:
+                viewport.flash_status(_tr("Select the edges to weld first."), 4000)
+            return
+        if pv["result"] is not None and set(new) <= set(pv["result"].get("edges", [])):
+            return
+        if not manual and set(new) == set(S["edges"]):
+            return
+        undo_preview()
+        S["edges"] = list(new)
+        select_quietly(new)
+        changed()
+
+    def poll():
+        if not follow.isChecked() or timer.isActive():
+            return
+        s = sel_sig()
+        if s != sig["v"]:
+            sig["v"] = s
+            read_selection(False)
+
+    sel_timer = QTimer(dlg)
+    sel_timer.setInterval(400)
+    sel_timer.timeout.connect(poll)
 
     def save_settings():
         st.setValue(f"plugins/{KEY}/gaps", gap_on.isChecked())
         st.setValue(f"plugins/{KEY}/tol_m", gap_val.value() * scale)
         st.setValue(f"plugins/{KEY}/collinear", collinear.isChecked())
-        st.setValue(f"plugins/{KEY}/preview", preview.isChecked())
+        st.setValue(f"plugins/{KEY}/preview", pv_btn.isChecked())
+        st.setValue(f"plugins/{KEY}/follow", follow.isChecked())
+
+    def preview_toggled(on):
+        style_preview(on)
+        save_settings()
+        timer.stop()
+        refresh()
+
+    def do_reset():
+        for w in (gap_on, gap_val, collinear):
+            w.blockSignals(True)
+        gap_on.setChecked(True)
+        gap_val.setValue(0.01 / scale)
+        collinear.setChecked(False)
+        for w in (gap_on, gap_val, collinear):
+            w.blockSignals(False)
+        changed()
 
     def on_ok():
+        timer.stop()
+        sel_timer.stop()
         save_settings()
+        cmd = pv["cmd"]
+        stack = getattr(viewport.history, "undo_stack", [])
+        if cmd is not None and pv["key"] == state_key() and stack and stack[-1] is cmd:
+            res = pv["result"] or {}
+            pv["cmd"] = None                     # the preview IS the result
+            if not res.get("curves") and not res.get("gaps"):
+                viewport.flash_status(_tr("Nothing to weld: every chain is a single edge."), 4000)
+            else:
+                viewport.flash_status(_tr(
+                    "Welded: {n} curve(s), {g} gap(s) closed, {p} point(s) removed",
+                    n=res.get("curves", 0), g=res.get("gaps", 0), p=res.get("points", 0)), 5000)
+            _STATE["preview"] = None
+            dlg.accept()
+            return
+        undo_preview()
         t, c = tol(), collinear.isChecked()
+        src = list(S["edges"])
         _STATE["preview"] = None
-        dlg.close()
-        run_weld(viewport, edges, t, c)
+        dlg.accept()
+        run_weld(viewport, src, t, c)
+
+    def on_rejected():
+        timer.stop()
+        sel_timer.stop()
+        save_settings()
+        undo_preview()
 
     def on_finished(*_a):
+        if _STATE.get("dialog") is not dlg:
+            return
         _STATE["preview"] = None
         _STATE["dialog"] = None
         try:
@@ -548,18 +754,29 @@ def open_dialog(viewport) -> None:
         except RuntimeError:  # the window is already gone (app closing)
             pass
 
-    for w in (gap_on, collinear, preview):
-        w.toggled.connect(refresh)
-    gap_val.valueChanged.connect(refresh)
+    for w in (gap_on, collinear):
+        w.toggled.connect(changed)
+    gap_val.valueChanged.connect(changed)
+    pv_btn.toggled.connect(preview_toggled)
+    reset.clicked.connect(do_reset)
     ok.clicked.connect(on_ok)
-    btns.rejected.connect(dlg.close)
+    cancel.clicked.connect(dlg.reject)
+    b_read.clicked.connect(lambda: read_selection(True))
+    follow.toggled.connect(lambda on: (sig.update(v=sel_sig()), save_settings()))
+    dlg.rejected.connect(on_rejected)
     dlg.finished.connect(on_finished)
     dlg.destroyed.connect(on_finished)
 
     _STATE["dialog"] = dlg
-    refresh()
+    style_preview(False)
+    sig["v"] = sel_sig()
+    show_plan()
     dlg.show()
     dlg.raise_()
+    sel_timer.start()
+    pv_btn.setChecked(st.value(f"plugins/{KEY}/preview", True, type=bool))
+    if not pv_btn.isChecked():
+        viewport.update()
 
 
 # ---------------------------------------------------------------------------
