@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 
 KEY = "weld_tool"
-VERSION = "1.2"
+VERSION = "1.3"
 
 _TEXTS = {
     "de": {
@@ -498,10 +498,15 @@ def open_dialog(viewport) -> None:
 
     gap_row = QHBoxLayout()
     gap_on = QCheckBox(_tr("Close gaps up to"))
-    gap_val = QDoubleSpinBox()
-    gap_val.setDecimals(4 if scale >= 1.0 else 2)
-    gap_val.setRange(0.0, 1e6)
-    gap_val.setSuffix(f" {unit}")
+    U = _pesi3d_units()
+    if U:                                  # the document's units, in metres
+        scale = 1.0
+        gap_val = U["Length"](None, minimum=0.0, maximum=1e6)
+    else:
+        gap_val = QDoubleSpinBox()
+        gap_val.setDecimals(4 if scale >= 1.0 else 2)
+        gap_val.setRange(0.0, 1e6)
+        gap_val.setSuffix(f" {unit}")
     gap_row.addWidget(gap_on)
     gap_row.addWidget(gap_val, 1)
     form.addRow(gap_row)
@@ -786,6 +791,163 @@ def open_dialog(viewport) -> None:
 # ---------------------------------------------------------------------------
 # Toolbar (PESI3D): icons drawn in IngeTrazo's own icon style
 # ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# PESI3D unit fields — keep this block identical in every PESI3D plugin.
+# Every length, angle and number field shows and reads the units of the
+# open document (IngeTrazo ▸ Preferences ▸ Units: length unit and form,
+# precision, angle unit, decimal separator). value() stays in metres /
+# degrees, so the code behind a dialog never converts anything.
+# ---------------------------------------------------------------------------
+_PESI3D_UNITS = {}
+
+
+def _pesi3d_units():
+    """``{"Length", "Angle", "Area", "Number", "len", "area", "angle",
+    "num"}`` —
+    field classes and formatters in the document's units, or ``None`` on
+    IngeTrazo builds before 0.5.8 (then the plain fields are used)."""
+    if "ok" in _PESI3D_UNITS:
+        return _PESI3D_UNITS["ok"]
+    try:
+        import math as _m
+        from core import units
+        from views.length_field import LengthSpinBox
+        from PySide6.QtGui import QValidator
+        from PySide6.QtWidgets import QDoubleSpinBox
+    except Exception:  # noqa: BLE001 - an older IngeTrazo
+        _PESI3D_UNITS["ok"] = None
+        return None
+
+    def _read_number(text, suffix):
+        t = text.strip()
+        if suffix and t.endswith(suffix.strip()):
+            t = t[: -len(suffix.strip())]
+        t = t.replace(" ", "").replace(",", ".")
+        try:
+            return float(t)
+        except ValueError:
+            return None
+
+    class _Field(QDoubleSpinBox):
+        def _read(self, text):                     # → value or None
+            raise NotImplementedError
+
+        def valueFromText(self, text):
+            v = self._read(text)
+            return self.value() if v is None else v
+
+        def validate(self, text, pos):
+            v = self._read(text)
+            ok = v is not None and \
+                self.minimum() - 1e-9 <= v <= self.maximum() + 1e-9
+            return (QValidator.Acceptable if ok else QValidator.Intermediate,
+                    text, pos)
+
+        def fixup(self, text):
+            return text
+
+    class AngleSpinBox(_Field):
+        """value() in degrees; text in the document's angle unit (°, rad,
+        gon) and angle precision (at least ``decimals``)."""
+
+        def __init__(self, parent=None, minimum=-360.0, maximum=360.0,
+                     decimals=1):
+            super().__init__(parent)
+            self._unit = units.unit_setting("angle") or "deg"
+            self._shown = max(int(decimals),
+                              int(units.unit_setting("angle_precision") or 1))
+            super().setDecimals(9)
+            self.setRange(minimum, maximum)
+            self.setSingleStep({"deg": 1.0, "grad": 0.9}.get(
+                self._unit, _m.degrees(0.01)))
+            self.setKeyboardTracking(False)
+
+        def textFromValue(self, value):
+            return units.localized(units.format_angle(
+                _m.radians(value), self._unit, self._shown))
+
+        def _read(self, text):
+            r = units.parse(text, "angle", self._unit)
+            return _m.degrees(r.value) if r.ok else None
+
+    class AreaSpinBox(_Field):
+        """value() in m²; text in the document's area unit and precision."""
+
+        def __init__(self, parent=None, minimum=0.0, maximum=1e6):
+            super().__init__(parent)
+            u = units.unit_setting("area") or "auto"
+            self._unit = (units.area_unit_for(units.model_unit())
+                          if u == "auto" else u)
+            self._shown = max(2, int(units.unit_setting("area_precision")
+                                     or 2))
+            super().setDecimals(9)
+            self.setRange(minimum, maximum)
+            self.setSingleStep(units.convert(
+                10 ** -self._shown, self._unit, "m2"))
+            self.setKeyboardTracking(False)
+
+        def textFromValue(self, value):
+            return units.localized(units.format_area(
+                value, self._unit, self._shown))
+
+        def _read(self, text):
+            r = units.parse(text, "area", self._unit)
+            return r.value if r.ok else None
+
+    class NumberSpinBox(_Field):
+        """A plain number (%, passes, factor …) with the document's decimal
+        separator; «1,5» and «1.5» are both read."""
+
+        def __init__(self, parent=None, minimum=0.0, maximum=1e6,
+                     decimals=2, suffix=""):
+            super().__init__(parent)
+            self._dec, self._suf = int(decimals), suffix
+            super().setDecimals(max(int(decimals), 6))
+            self.setRange(minimum, maximum)
+            self.setSingleStep(1.0 if decimals == 0 else 10 ** -min(decimals, 1))
+            self.setKeyboardTracking(False)
+
+        def textFromValue(self, value):
+            return units.localized(f"{value:.{self._dec}f}{self._suf}")
+
+        def _read(self, text):
+            pre = self.prefix()
+            if pre and text.startswith(pre):
+                text = text[len(pre):]
+            return _read_number(text, self._suf)
+
+    class Length(LengthSpinBox):
+        def __init__(self, parent=None, minimum=0.0, maximum=1000.0,
+                     decimals=None):
+            super().__init__(parent, minimum=minimum, maximum=maximum,
+                             decimals=decimals)
+            self.setKeyboardTracking(False)
+
+    def fmt_len(metres, fine=False):
+        if fine:
+            return units.fmt_len_fine(float(metres))
+        return units.fmt_len(float(metres))
+
+    def fmt_area(m2):
+        return units.fmt_area(float(m2))
+
+    def fmt_angle(deg):
+        return units.fmt_angle_deg(float(deg))
+
+    def fmt_num(v, dec=2):
+        return units.localized(f"{float(v):,.{dec}f}".replace(",", " ")
+                               if abs(v) >= 1e4 else f"{float(v):.{dec}f}")
+
+    res = {"Length": Length, "Angle": AngleSpinBox, "Number": NumberSpinBox,
+           "Area": AreaSpinBox,
+           "len": fmt_len, "area": fmt_area, "angle": fmt_angle,
+           "num": fmt_num, "units": units}
+    _PESI3D_UNITS["ok"] = res
+    return res
+
 
 def _pesi3d_icons():
     """Icon key → draw(painter, ink, accent) on a 48 px canvas."""
